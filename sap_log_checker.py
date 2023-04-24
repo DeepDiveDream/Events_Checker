@@ -58,38 +58,49 @@ def __check_need_update(postgre_cursor, event_source, update_interval):
     return True
 
 
-def __update_requests(result_file_path, result_file_name, start_date_column, start_time_column,  end_date_column,
-                      end_time_column, file_list, sap_dir, is_asap_mode):
+def __update_requests_asap(result_file_path, result_file_name, start_date_column, start_time_column, end_date_column,
+                           end_time_column, file_list, sap_dir):
     today = datetime.today()
     today_date_int = int(today.strftime('%Y%m%d%H%M%S'))
 
-    if os.path.isfile(result_file_path):
-
-        df = pd.read_csv(result_file_path, sep="\t")
-        df['combo_end'] = pd.to_numeric(df['combo_end'], errors="coerce")
-        df[end_date_column] = pd.to_numeric(df[end_date_column], errors="coerce")
-
-        # оставляем только события дата окончания которых ещё не прошла или не указана
-        mask = (df['combo_end'] >= today_date_int) | (df[end_date_column] == 0)
-        df = df.loc[mask]
-
-        df.to_csv(result_file_path, sep="\t", index=False, header=True, mode="w")
-    else:
-        # создаем пустой файл в зависимости от режима проверки заявок
-        if is_asap_mode:
-            df = pd.DataFrame(columns=['bukrs', 'butxt', 'swerk', 'name1', 'stort', 'ktext', 'qmnum', 'stat_sys',
-                                       'stat_cus', 'tplnr', 'pltxt', 'ausvn', 'auztv', 'ausbs', 'auztb',
-                                       'txt_short', 'txt_long', 'combo_start', 'combo_end'])
-        else:
-            df = pd.DataFrame(columns=['bukrs', 'butxt', 'swerk', 'name1', 'stort', 'ktext', 'wapinr', 'stat_sys',
-                                       'stat_cus', 'priokx', 'tplnr', 'pltxt', 'tsdate', 'tstime', 'tfdate', 'tftime',
-                                       'txt_short', 'txt_long', 'combo_start', 'combo_end'])
-        df.to_csv(result_file_path, sep="\t", index=False, header=True, mode="a")
+    df = pd.DataFrame(columns=['bukrs', 'butxt', 'swerk', 'name1', 'stort', 'ktext', 'qmnum', 'stat_sys',
+                               'stat_cus', 'tplnr', 'pltxt', 'ausvn', 'auztv', 'ausbs', 'auztb',
+                               'txt_short', 'txt_long', 'combo_start', 'combo_end'])
+    df.to_csv(result_file_path, sep="\t", index=False, header=True, mode="w")
 
     for filename in file_list:
         file_path = os.path.join(sap_dir, filename)
         if os.path.isfile(file_path) and filename != result_file_name:
-            df = pd.read_csv(file_path, sep="\t", header=0)
+            df = pd.read_csv(file_path, sep="\t", header=0, dtype=str, keep_default_na=False)
+
+            df['combo_start'] = df[start_date_column].astype(str) + df[start_time_column].astype(str)
+            df['combo_end'] = df[end_date_column].astype(str) + df[end_time_column].astype(str)
+
+            df['combo_end'] = pd.to_numeric(df['combo_end'], errors="coerce")
+            df[end_date_column] = pd.to_numeric(df[end_date_column], errors="coerce")
+
+            # оставляем только события дата окончания которых ещё не прошла или не указана
+            mask = (df['combo_end'] >= today_date_int) | (df[end_date_column] == 0)
+            df = df.loc[mask]
+            df.to_csv(result_file_path, sep="\t", index=False, header=False, mode="a")
+
+
+def __update_requests(result_file_path, result_file_name, start_date_column, start_time_column, end_date_column,
+                      end_time_column, file_list, sap_dir):
+    today = datetime.today()
+    today_date_int = int(today.strftime('%Y%m%d%H%M%S'))
+
+    # создаем пустой файл в зависимости от режима проверки заявок
+    df = pd.DataFrame(columns=['bukrs', 'butxt', 'swerk', 'name1', 'stort', 'ktext', 'wapinr', 'stat_sys',
+                               'stat_cus', 'priokx', 'tplnr', 'pltxt', 'tsdate', 'tstime', 'tfdate', 'tftime',
+                               'txt_short', 'txt_long', 'combo_start', 'combo_end'])
+
+    df.to_csv(result_file_path, sep="\t", index=False, header=True, mode="w")
+
+    for filename in file_list:
+        file_path = os.path.join(sap_dir, filename)
+        if os.path.isfile(file_path) and filename != result_file_name:
+            df = pd.read_csv(file_path, sep="\t", header=0, dtype=str, keep_default_na=False)
 
             df['combo_start'] = df[start_date_column].astype(str) + df[start_time_column].astype(str)
             df['combo_end'] = df[end_date_column].astype(str) + df[end_time_column].astype(str)
@@ -140,27 +151,31 @@ def __update_sap_file(path_to_config, source):
         return
 
     shift_days = int(config_ini.get('sap_log_checker', 'shift_days'))
-    log_dir = config_ini.get('common', 'logdir')
-    log_file_name = config_ini.get('sap_log_checker', 'logfile')
+    shift_hours = int(config_ini.get('sap_log_checker', 'shift_hours'))
 
-    if log_dir != "":
-        log_file_name = log_dir + "/" + log_file_name
+    data_dir = config_ini.get('common', 'datadir')
 
     sap_dir = config_ini.get('sap_log_checker', 'sap_dir')
+    sap_dir = os.path.join(data_dir, sap_dir)
+
     result_filename = config_ini.get('sap_log_checker', 'sap_file')
+    result_file_path = os.path.join(sap_dir, result_filename)
+    result_asap_filename = result_filename + "_asap"
+    result_asap_file_path = os.path.join(sap_dir, result_asap_filename)
+
+    log_dir = config_ini.get('common', 'logdir')
+    log_file_name = config_ini.get('sap_log_checker', 'logfile')
+    log_file_name = os.path.join(log_dir, log_file_name)
+
     ftp_server = config_ini.get('sap_log_checker', 'ftp_server')
     ftp_port = int(config_ini.get('sap_log_checker', 'ftp_port'))
     ftp_username = config_ini.get('sap_log_checker', 'ftp_username')
     ftp_password = config_ini.get('sap_log_checker', 'ftp_password')
     ftp_dir = config_ini.get('sap_log_checker', 'ftp_dir')
 
-    result_file_path = os.path.join(sap_dir, result_filename)
-
-    result_asap_filename = result_filename + "_asap"
-    result_asap_file_path = os.path.join(sap_dir, result_asap_filename)
-
     today = datetime.today()
     cutoff_date_int = int((today - timedelta(days=shift_days)).strftime('%Y%m%d'))
+    cutoff_datetime_int = int((today - timedelta(hours=shift_hours)).strftime('%Y%m%d%H%M%S'))
 
     if not os.path.exists(sap_dir):
         os.makedirs(sap_dir)
@@ -177,12 +192,19 @@ def __update_sap_file(path_to_config, source):
                 if date_int < cutoff_date_int:
                     if os.path.isfile(file_path):
                         os.remove(file_path)
+
             except Exception as e:
                 __write_log(log_file_name, f"{datetime.now()}| Failed to delete {file_path}. Reason: {e}")
                 continue
 
     downloaded_request_files = []
     downloaded_asap_files = []
+
+    latest_zay_date = -1
+    latest_p4_date = -1
+
+    latest_zay_name = None
+    latest_p4_name = None
 
     ftp = FTP()
     ftp.connect(ftp_server, ftp_port, timeout=100)
@@ -194,31 +216,69 @@ def __update_sap_file(path_to_config, source):
     for filename in filenames:
         parts = filename.split("_")
         try:
-            date_int = int(parts[-2])
-            # которые младше даты отсечения
-            if date_int >= cutoff_date_int:
-                local_file_path = os.path.join(sap_dir, filename)
+            date_int = str(parts[-2])
+            # tmp =
+            time_int = str(str(parts[-1]).split('.')[0])
+            combodate = int(date_int + time_int)
 
-                if not os.path.isfile(local_file_path):
-                    with open(local_file_path, 'wb') as local_file:
-                        ftp.retrbinary('RETR ' + filename, local_file.write)
-                        if 'zay' in filename:
+            # скачиваем все файлы младше даты отсечения и определяем самые новые для каждого типа
+            if 'zay' in filename:
+                if latest_zay_date is None or combodate > latest_zay_date:
+                    latest_zay_date = combodate
+                    latest_zay_name = filename
+                if int(date_int) >= cutoff_date_int:
+                    local_file_path = os.path.join(sap_dir, filename)
+                    if not os.path.isfile(local_file_path):
+                        with open(local_file_path, 'wb') as local_file:
+                            ftp.retrbinary('RETR ' + filename, local_file.write)
                             downloaded_request_files.append(filename)
-                        if 'P4' in filename:
+            if 'P4' in filename:
+                if latest_p4_date is None or combodate > latest_p4_date:
+                    latest_p4_date = combodate
+                    latest_p4_name = filename
+                if combodate >= cutoff_datetime_int:
+                    local_file_path = os.path.join(sap_dir, filename)
+                    if not os.path.isfile(local_file_path):
+                        with open(local_file_path, 'wb') as local_file:
+                            ftp.retrbinary('RETR ' + filename, local_file.write)
                             downloaded_asap_files.append(filename)
+
         except Exception as e:
             __write_log(log_file_name, f"{datetime.now()}| Failed to copy from FTP file {filename}. Reason: {e}")
             continue
+
+    # Всегда пытаемся скачать самые свежие файлы если уже не скачали
+    if latest_zay_name is not None:
+        local_file_path = os.path.join(sap_dir, latest_zay_name)
+        if not os.path.isfile(local_file_path):
+            with open(local_file_path, 'wb') as local_file:
+                ftp.retrbinary('RETR ' + latest_zay_name, local_file.write)
+                downloaded_request_files.append(latest_zay_name)
+
+    if latest_p4_name is not None:
+        local_file_path = os.path.join(sap_dir, latest_p4_name)
+        if not os.path.isfile(local_file_path):
+            with open(local_file_path, 'wb') as local_file:
+                ftp.retrbinary('RETR ' + latest_p4_name, local_file.write)
+                downloaded_asap_files.append(latest_p4_name)
     ftp.quit()
 
-    __update_requests(result_asap_file_path, result_asap_filename, start_date_column_asap, start_time_column_asap,
-                      end_date_column_asap, end_time_column_asap, downloaded_asap_files, sap_dir, True)
+    try:
+        __update_requests_asap(result_asap_file_path, result_asap_filename, start_date_column_asap,
+                               start_time_column_asap,
+                               end_date_column_asap, end_time_column_asap, downloaded_asap_files, sap_dir)
 
-    __write_log(log_file_name, f"{datetime.now()}| Successfully update {result_file_path}")
+        __write_log(log_file_name, f"{datetime.now()}| Successfully update {result_asap_file_path}")
 
-    __update_requests(result_file_path, result_filename, start_date_column, start_time_column,
-                      end_date_column, end_time_column, downloaded_request_files, sap_dir, False)
-    __write_log(log_file_name, f"{datetime.now()}| Successfully update {result_asap_file_path}")
+    except Exception as e:
+        __write_log(log_file_name, f"{datetime.now()}| Failed to update  {result_asap_file_path}. Reason: {e}")
+
+    try:
+        __update_requests(result_file_path, result_filename, start_date_column, start_time_column,
+                          end_date_column, end_time_column, downloaded_request_files, sap_dir)
+        __write_log(log_file_name, f"{datetime.now()}| Successfully update {result_file_path}")
+    except Exception as e:
+        __write_log(log_file_name, f"{datetime.now()}| Failed to update  {result_file_path}. Reason: {e}")
 
     postgre_cursor.execute(f"SELECT id, data ->> 'event_date' as event_date "
                            f"FROM event_source_data where source = {event_source} "
@@ -255,4 +315,4 @@ def update(path_to_config, source):
 
 
 if __name__ == "__main__":
-    update("elsec.conf", 0)
+    update("/ets/elsec/elsec.conf", 0)

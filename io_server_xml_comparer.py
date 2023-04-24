@@ -193,24 +193,34 @@ def write_event(last_event, field_map_event, event_source, changes_result):
 
 def check_event_source(event_source, param_dict):
 
-    original_file = xml_dir_etalon + param_dict["original_file"]
-    path = Path(original_file)
-    if not path.is_file():
-        msg = f'{currentScript} {datetime.now()} Эталонный XML файл {original_file} сервера ввода-вывода не найден!'
-        if console_messages:
-            print(msg)
-        write_log(log_file_name, msg)
-        return
-
     input_file = xml_dir_input + param_dict["input_file"]
 
     path = Path(input_file)
     if not path.is_file():
-        msg = f'{currentScript} {datetime.now()} Проверяемый XML файл {input_file} сервера ввода-вывода не найден!'
+        msg = f'{datetime.now()} | {currentScript} | source: {event_source} | ' \
+            f'Проверяемый XML файл {input_file} сервера ввода-вывода не найден!'
         if console_messages:
             print(msg)
         write_log(log_file_name, msg)
         return
+
+    original_file = xml_dir_etalon + param_dict["original_file"]
+    path = Path(original_file)
+
+    if not path.is_file():
+        msg = f'{datetime.now()} | {currentScript} | source: {event_source} | ' \
+            f'Эталонный XML файл {original_file} сервера ввода-вывода не найден!'
+        if console_messages:
+            print(msg)
+        write_log(log_file_name, msg)
+        return
+        # обновляем эталон и помечаем в событии, что файл обновлен
+        # shutil.copyfile(input_file, original_file)
+        # msg = f'{datetime.now()} | {currentScript} | source: {event_source} | ' \
+        #     f'Эталонный XML файл {original_file} сервера ввода-вывода создан на основе входящего!'
+        # if console_messages:
+        #     print(msg)
+        # write_log(log_file_name, msg)
 
     query = f"SELECT *  FROM event where type = {event_type} and source = {event_source} " \
         f"order by id desc limit 1"
@@ -234,9 +244,12 @@ def check_event_source(event_source, param_dict):
                 # обновляем эталон и помечаем в событии, что файл обновлен
                 shutil.copyfile(input_file, original_file)
 
-                msg = f'{currentScript} {datetime.now()} Эталон XML файла сервера ввода-вывода обновлён!'
+                msg = f'{datetime.now()} | {currentScript} | source: {event_source} | ' \
+                    f'Эталон XML файла сервера ввода-вывода обновлён!'
+
                 if console_messages:
                     print(msg)
+
                 write_log(log_file_name, msg)
 
                 json_data = {
@@ -262,18 +275,26 @@ def check_event_source(event_source, param_dict):
     size_diff = abs(original_size-input_size)
 
     if size_diff > 1024:
-        changes_result = "<br>Обнаружено значительное несоответствие XML файлов!" + \
+        changes_result = "<br>Обнаружено значительное несоответствие XML файлов сервера ввода-вывода!" + \
                           "<br> &nbsp &nbsp &nbsp Размер проверяемого XML файла сервера ввода-вывода " + \
                           f"отличается от эталона на {size_diff} символов!" + \
                           f"<br> &nbsp &nbsp &nbsp({round(size_diff/1024,1)}Кбайт)"
 
+        msg = f'{datetime.now()} | {currentScript} | source: {event_source} | ' \
+            f'Обнаружено значительное несоответствие XML файлов сервера ввода-вывода!'
+
+        if console_messages:
+            print(msg)
+
+        write_log(log_file_name, msg)
         write_event(last_event, field_map_event, event_source, changes_result)
         return
 
     out = compare_xmlns(original_file, input_file)
 
     if out == '':
-        msg = f'{currentScript} {datetime.now()} Изменения в XML файле {input_file} сервера ввода-вывода не найдены!'
+        msg = f'{datetime.now()} | {currentScript} | source: {event_source} | ' \
+            f'Изменения в XML файле {input_file} сервера ввода-вывода не найдены!'
         if console_messages:
             print(msg)
         write_log(log_file_name, msg)
@@ -363,6 +384,13 @@ def check_event_source(event_source, param_dict):
         print(changes_result)
         print(changes_path)
 
+    msg = f'{datetime.now()} | {currentScript} | source: {event_source} | ' \
+        f'Обнаружено изменение в XML файле сервера ввода-вывода!'
+
+    if console_messages:
+        print(msg)
+
+    write_log(log_file_name,msg)
     write_event(last_event,field_map_event,event_source,changes_result)
 
 
@@ -425,13 +453,16 @@ if __name__ == "__main__":
         postgre_port = config_ini.get('common', 'pgport')
         postgre_database = config_ini.get('common', 'pgdb')
         log_dir = config_ini.get('common', 'logdir')
+        data_dir = config_ini.get('common', 'datadir')
 
         xml_dir_etalon = config_ini.get('io_server_xml_comparer', 'xml_dir_etalon')
+        xml_dir_etalon = os.path.join(data_dir, xml_dir_etalon)
+
         xml_dir_input = config_ini.get('io_server_xml_comparer', 'xml_dir_input')
+        xml_dir_input = os.path.join(data_dir, xml_dir_input)
 
         log_file_name = config_ini.get('io_server_xml_comparer', 'logfile')
-        if log_dir != "":
-            log_file_name = log_dir + "/" + log_file_name
+        log_file_name = os.path.join(log_dir, log_file_name)
 
         postgre_conn = connect_to_postgre(postgre_database, postgre_user, postgre_pass,
                                           postgre_host, postgre_port, event_source_main)

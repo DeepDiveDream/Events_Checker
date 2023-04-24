@@ -107,7 +107,7 @@ def load_sap_file(sap_file_path, event_source, is_asap_mode):
     path = Path(sap_file_path)
     if not path.is_file():
         msg = f'{datetime.now()} | {currentScript} | source: {event_source} | ' \
-            f'Файл {sap_file_path} с данными SAP-R3 не найден!'
+            f'Файл {sap_file_path} с данными SAP не найден!'
         if console_messages:
             print(msg)
         write_log(log_file_name, msg)
@@ -127,7 +127,6 @@ def load_sap_file(sap_file_path, event_source, is_asap_mode):
             f'Файл {sap_file_path} с данными SAP успешно прочитан!'
         if console_messages:
             print(msg)
-        write_log(log_file_name, msg)
         write_connection_log(event_source, currentScript, "SAP", sap_file_path, True, msg)
 
         return df
@@ -150,7 +149,6 @@ def check_lines_asu_reo(dbase_scada_model, event_source, scada_event_datetime,
         return result
 
     # Список всех Line по коду подстанции
-
     query = f"SELECT distinct [{dbase_scada_model}].[dbo].[Equipment].EquipmentContainerKey, " \
         f"[{dbase_scada_model}].[dbo].[IdentifiedObject].KeyLink as LineKey, " \
         f"[{dbase_scada_model}].[dbo].[IdentifiedObject].name_, " \
@@ -178,8 +176,6 @@ def check_lines_asu_reo(dbase_scada_model, event_source, scada_event_datetime,
     lines = scada_model_cursor.fetchall()
     field_map_lines = fields(scada_model_cursor)
 
-    oldest_zvk_date = (scada_event_datetime - timedelta(days=oldest_zvk_date_delta)).date()
-
     find_any_line = False
 
     # Пробегаем по всем линиям которые подключены к подстанции на которой произошло событие
@@ -203,27 +199,44 @@ def check_lines_asu_reo(dbase_scada_model, event_source, scada_event_datetime,
         find_any_line = True
 
         query = f"SELECT ZVKBodyId  FROM zvkbody  " \
-            f"where zvkobjectid = {asureo_line_id} " \
-            f"and " \
-            f"((zvkcategoryid = 48 and plandatebegin >= '{oldest_zvk_date}' " \
-            f"and plandateend <= '{scada_event_datetime}')" \
-            f"or " \
-            f"(zvkcategoryid = 49  and permitrepairdatebegin >= '{oldest_zvk_date}' " \
-            f"and permitrepairdateend <= '{scada_event_datetime}'))" \
-            f"order by zvkbodyid"
+            f"where deviceid = {asureo_line_id} " \
+            f"and needrepairdatebegin <= '{scada_event_datetime}' " \
+            f"and needrepairdateend >= '{scada_event_datetime}' order by zvkbodyid"
 
         asu_reo_cursor.execute(query)
         res = asu_reo_cursor.fetchall()
+
         # Если хоть что-то нашли - значит запланировано
         if len(res) > 0:
             result.unplannedEvent = False
             result.processed = True
+
+            query = f"SELECT zvkopener, createdate, deviceid, zvkobjectid, " \
+                f"selfnumber, needrepairdatebegin as datebegin, " \
+                f"needrepairdateend as dateend, z_cat.name as cat_name " \
+                f"FROM public.zvkbody as z_body " \
+                f"inner join public.zvkcategory as z_cat " \
+                f"on z_body.zvkcategoryid = z_cat.zvkcategoryid where ZVKBodyId = {res[0][0]}"
+
+            asu_reo_cursor.execute(query)
+            fields_map_zvk_content = fields(asu_reo_cursor)
+            zvk_content = asu_reo_cursor.fetchone()
+            result.message = f"№ {zvk_content[fields_map_zvk_content['selfnumber']]}, " \
+                f"Автор: {zvk_content[fields_map_zvk_content['zvkopener']]}, " \
+                f"Дата: {zvk_content[fields_map_zvk_content['createdate']]}, " \
+                f"Тип: {zvk_content[fields_map_zvk_content['cat_name']]}, " \
+                f"Период: с {zvk_content[fields_map_zvk_content['datebegin']]}, " \
+                f"по {zvk_content[fields_map_zvk_content['dateend']]}, " \
+                f"ID оборудования АСУ РЭО: {zvk_content[fields_map_zvk_content['deviceid']]}, " \
+                f"ID энергообъекта АСУ РЭО: {zvk_content[fields_map_zvk_content['zvkobjectid']]}"
+
             return result
 
     if not find_any_line:
-        msg = f'{datetime.now()} | {currentScript} | source: {event_source} | ' \
-            f'Не удалось определить линии АСУРЭО для подстанции с KeyLink = \'{substation_key}\''
-        write_log(log_file_name, msg)
+        if not_found_messages:
+            msg = f'{datetime.now()} | {currentScript} | source: {event_source} | ' \
+                f'Не удалось определить линии АСУРЭО для подстанции с KeyLink = \'{substation_key}\''
+            write_log(log_file_name, msg)
 
     # Если ни по одной линии ничего не нашли - значит НЕ запланировано
     result.unplannedEvent = True
@@ -249,45 +262,51 @@ def check_substation_asu_reo(dbase_scada_model, event_source, scada_event_dateti
     if res:
         asureo_power_obj_id = res[0]
 
-    # asureo_power_obj_id = 199
-
     if asureo_power_obj_id is None:
-        msg = f'{datetime.now()} | {currentScript} | source: {event_source} | ' \
-            f'Не удалось определить подстанцию АСУРЭО для подстанции с KeyLink = \'{substation_key}\''
-        write_log(log_file_name, msg)
+        if not_found_messages:
+            msg = f'{datetime.now()} | {currentScript} | source: {event_source} | ' \
+                f'Не удалось определить подстанцию АСУРЭО для подстанции с KeyLink = \'{substation_key}\''
+            write_log(log_file_name, msg)
         result.processed = False
         result.unplannedEvent = True
         return result
 
-    oldest_zvk_date = (scada_event_datetime - timedelta(days=oldest_zvk_date_delta)).date()
-
     query = f"SELECT ZVKBodyId  FROM zvkbody  " \
-        f"where zvkobjectid = {asureo_power_obj_id} " \
-        f"and " \
-        f"((zvkcategoryid = 48 and plandatebegin >= '{oldest_zvk_date}' " \
-        f"and plandateend <= '{scada_event_datetime}')" \
-        f"or " \
-        f"(zvkcategoryid = 49  and permitrepairdatebegin >= '{oldest_zvk_date}' " \
-        f"and permitrepairdateend <= '{scada_event_datetime}'))" \
-        f"order by zvkbodyid"
+        f"where zvkobjectid = {asureo_power_obj_id} "  \
+        f"and needrepairdatebegin <= '{scada_event_datetime}' " \
+        f"and needrepairdateend >= '{scada_event_datetime}' order by zvkbodyid"
+
     asu_reo_cursor.execute(query)
-
     res = asu_reo_cursor.fetchall()
-
-    unplanned_event = True
 
     # Если хоть что-то нашли - значит запланировано
     if len(res) > 0:
-        unplanned_event = False
+        result.processed = True
+        result.unplannedEvent = False
+        query = f"SELECT zvkopener, createdate, deviceid, zvkobjectid, " \
+            f"selfnumber, needrepairdatebegin as datebegin, " \
+            f"needrepairdateend as dateend, z_cat.name as cat_name " \
+            f"FROM public.zvkbody as z_body " \
+            f"inner join public.zvkcategory as z_cat " \
+            f"on z_body.zvkcategoryid = z_cat.zvkcategoryid where ZVKBodyId = {res[0][0]}"
 
-    result.processed = True
-    result.unplannedEvent = unplanned_event
+        asu_reo_cursor.execute(query)
+        fields_map_zvk_content = fields(asu_reo_cursor)
+        zvk_content = asu_reo_cursor.fetchone()
+        result.message = f"№ {zvk_content[fields_map_zvk_content['selfnumber']]}, " \
+            f"Автор: {zvk_content[fields_map_zvk_content['zvkopener']]}, " \
+            f"Дата: {zvk_content[fields_map_zvk_content['createdate']]}, " \
+            f"Тип: {zvk_content[fields_map_zvk_content['cat_name']]}, " \
+            f"Период: с {zvk_content[fields_map_zvk_content['datebegin']]}, " \
+            f"по {zvk_content[fields_map_zvk_content['dateend']]}, " \
+            f"ID оборудования АСУ РЭО: {zvk_content[fields_map_zvk_content['deviceid']]}, " \
+            f"ID энергообъекта АСУ РЭО: {zvk_content[fields_map_zvk_content['zvkobjectid']]}"
+
     return result
 
 
 def check_substation_sap(dbase_scada_model, scada_model_cursor, event_source, sap_requests,
                          sap_requests_asap, scada_event_datetime, substation_key):
-
     result = CheckResult()
 
     if sap_requests is None and sap_requests_asap is None:
@@ -301,45 +320,63 @@ def check_substation_sap(dbase_scada_model, scada_model_cursor, event_source, sa
     if res:
         sap_substation = res[0]
 
-    # sap_substation = "PS110-000618"
-
     if sap_substation is None:
-        msg = f'{datetime.now()} | {currentScript} | source: {event_source} | ' \
-            f'Не удалось определить подстанцию SAP для подстанции с KeyLink = \'{substation_key}\''
-        write_log(log_file_name, msg)
+        if not_found_messages:
+            msg = f'{datetime.now()} | {currentScript} | source: {event_source} | ' \
+                f'Не удалось определить подстанцию SAP для подстанции с KeyLink = \'{substation_key}\''
+            write_log(log_file_name, msg)
+
         result.processed = False
         result.unplannedEvent = True
         return result
 
-    # Get the current date and time as integers
+    # event_datetime = int(datetime.now().strftime('%Y%m%d%H%M%S'))
     event_datetime = int(scada_event_datetime.strftime('%Y%m%d%H%M%S'))
 
     # Сначала проверяем аварийные заявки
     sap_events = sap_requests_asap
 
     mask = sap_events[sap_tech_place_column].str.contains(sap_substation) & \
-           ((sap_events['combo_start'] <= event_datetime) & (sap_events['combo_end'] >= event_datetime)
-            | (sap_events[sap_end_date_column_asap] == 0))
+           (
+                   ((sap_events['combo_start'] <= event_datetime) & (sap_events['combo_end'] >= event_datetime))
+                   |
+                   ((sap_events['combo_start'] <= event_datetime) & (sap_events[sap_end_date_column_asap] == 0))
+           )
 
     sap_events = sap_events.loc[mask]
 
     if len(sap_events) > 0:
-        result.unplanned_event = False
+        result.unplannedEvent = False
         result.processed = True
+        msg_lst = sap_events.iloc[0].tolist()
+        sap_msg = ''
+        for lst in msg_lst:
+            lst = str(lst)
+            lst = lst.replace('\t', '')
+            lst = lst.strip()
+            sap_msg += lst + "|"
+        result.message = sap_msg
         return result
 
     # Потом проверяем обычные заявки
     sap_events = sap_requests
 
     mask = sap_events[sap_tech_place_column].str.contains(sap_substation) & \
-           ((sap_events['combo_start'] <= event_datetime) & (sap_events['combo_end'] >= event_datetime)
-            | (sap_events[sap_end_date_column] == 0))
+           ((sap_events['combo_start'] <= event_datetime) & (sap_events['combo_end'] >= event_datetime))
 
     sap_events = sap_events.loc[mask]
 
     if len(sap_events) > 0:
-        result.unplanned_event = False
+        result.unplannedEvent = False
         result.processed = True
+        msg_lst = sap_events.iloc[0].tolist()
+        sap_msg = ''
+        for lst in msg_lst:
+            lst = str(lst)
+            lst = lst.replace('\t', '')
+            lst = lst.strip()
+            sap_msg += lst + "|"
+        result.message = sap_msg
         return result
 
     result.processed = True
@@ -398,7 +435,6 @@ def check_lines_sap(dbase_scada_model, scada_model_cursor, event_source, sap_req
         if res:
             sap_line = res[0]
 
-        # sap_line = "VS010-0010687"
         if sap_line is None:
             continue
 
@@ -411,34 +447,53 @@ def check_lines_sap(dbase_scada_model, scada_model_cursor, event_source, sap_req
         # Сначала проверяем аварийные заявки
         sap_events = sap_requests_asap
         mask = sap_events[sap_tech_place_column].str.contains(sap_line) & \
-               ((sap_events['combo_start'] <= event_datetime) & (sap_events['combo_end'] >= event_datetime)
-                | (sap_events[sap_end_date_column_asap] == 0))
+               (
+                       ((sap_events['combo_start'] <= event_datetime) & (sap_events['combo_end'] >= event_datetime))
+                       |
+                       ((sap_events['combo_start'] <= event_datetime) & (sap_events[sap_end_date_column_asap] == 0))
+               )
 
         sap_events = sap_events.loc[mask]
 
         if len(sap_events) > 0:
-            result.unplanned_event = False
+            result.unplannedEvent = False
             result.processed = True
+            msg_lst = sap_events.iloc[0].tolist()
+            sap_msg = ''
+            for lst in msg_lst:
+                lst = str(lst)
+                lst = lst.replace('\t', '')
+                lst = lst.strip()
+                sap_msg += lst + "|"
+            result.message = sap_msg
             return result
 
         # Потом проверяем обычные заявки
         sap_events = sap_requests
 
         mask = sap_events[sap_tech_place_column].str.contains(sap_line) & \
-               ((sap_events['combo_start'] <= event_datetime) & (sap_events['combo_end'] >= event_datetime)
-                | (sap_events[sap_end_date_column] == 0))
+               ((sap_events['combo_start'] <= event_datetime) & (sap_events['combo_end'] >= event_datetime))
 
         sap_events = sap_events.loc[mask]
 
         if len(sap_events) > 0:
-            result.unplanned_event = False
+            result.unplannedEvent = False
             result.processed = True
+            msg_lst = sap_events.iloc[0].tolist()
+            sap_msg = ''
+            for lst in msg_lst:
+                lst = str(lst)
+                lst = lst.replace('\t', '')
+                lst = lst.strip()
+                sap_msg += lst + "|"
+            result.message = sap_msg
             return result
 
     if not find_any_line:
-        msg = f'{datetime.now()} | {currentScript} | source: {event_source} | ' \
-            f'Не удалось определить линии САП для подстанции с KeyLink = \'{substation_key}\''
-        write_log(log_file_name, msg)
+        if not_found_messages:
+            msg = f'{datetime.now()} | {currentScript} | source: {event_source} | ' \
+                f'Не удалось определить линии САП для подстанции с KeyLink = \'{substation_key}\''
+            write_log(log_file_name, msg)
 
     # Если ни по одной линии ничего не нашли - значит НЕ запланировано
     result.unplannedEvent = unplanned_event
@@ -447,6 +502,7 @@ def check_lines_sap(dbase_scada_model, scada_model_cursor, event_source, sap_req
 
 
 def check_event_source(event_source, param_dict):
+
     ip_address = param_dict["ip_scada_events"]
     login = param_dict["login_scada_events"]
     password = param_dict["password_scada_events"]
@@ -475,7 +531,7 @@ def check_event_source(event_source, param_dict):
         return
 
     # получаем курсор и в скаде в БД Модели
-    scada_model_cursor = scada_events_conn.cursor()
+    scada_model_cursor = scada_model_conn.cursor()
 
     ip_address = param_dict["ip_asu_reo"]
     login = param_dict["login_asu_reo"]
@@ -490,10 +546,13 @@ def check_event_source(event_source, param_dict):
     else:
         asu_reo_cursor = asu_reo_conn.cursor()
 
+    net_black_list_str = param_dict["netblock_blacklist"]
+    net_black_list = net_black_list_str.split(',')
+
     sap_file_path = os.path.join(sap_dir, sap_file)
     sap_requests = load_sap_file(sap_file_path, event_source, False)
 
-    sap_file_path = os.path.join(sap_dir, sap_file+"_asap")
+    sap_file_path = os.path.join(sap_dir, sap_file + "_asap")
     sap_requests_asap = load_sap_file(sap_file_path, event_source, True)
 
     query = f"SELECT scada_codes, description, scada_table " \
@@ -538,8 +597,10 @@ def check_event_source(event_source, param_dict):
                 f"where code = {event_code} order by dt"
         else:
             last_request_unix_time = last_processed_request[field_map_last_request['unix_date']]
+            # перепроверяем заявки за полчаса до последней обработаной
+            check_unix_time = last_request_unix_time - 1800
             query = f"Select KeyLink, code, dt, obj, user_ FROM [{dbase_scada_events}].[dbo].[{scada_event_table}] " \
-                f"where code = {event_code} and dt > {last_request_unix_time} order by dt"
+                f"where code = {event_code} and dt >= {check_unix_time} order by dt"
 
         scada_events_cursor.execute(query)
         all_events = scada_events_cursor.fetchall()
@@ -568,6 +629,18 @@ def check_event_source(event_source, param_dict):
             user_full_name = "не найден"
             user_values_string = f"<b>Пользователь:</b> {user_full_name}<br>"
             event_source_host = ''
+
+            already_handled_unplanned_event_id = 0
+            query = f"SELECT id, type, legitimated  " \
+                f" FROM public.event where source = {event_source} " \
+                f" and data ->> 'event_key'='{scada_event_keylink}' " \
+                f" and data ->> 'event_code'='{event_code}' "
+            postgre_cursor.execute(query)
+            res = postgre_cursor.fetchone()
+            if res:
+                if res[1] == planned_event_type or res[2] is not None:
+                    continue
+                already_handled_unplanned_event_id = res[0]
 
             if user_id is not None:
                 # Получаем Юзера создавшего события
@@ -601,6 +674,22 @@ def check_event_source(event_source, param_dict):
                         if start > 0 and end > 0:
                             event_source_host = caption[start + 1:end]
 
+                is_not_blocking = False
+                if event_source_host != '':
+                    for ip in net_black_list:
+                        if ip in event_source_host:
+                            msg = f'{datetime.now()} | {currentScript} | source: {event_source} | ' \
+                                f'Событие с KeyLink = \'{scada_event_obj}\' пропущено, т.к. IP события ' \
+                                f'{event_source_host} находится в списке не блокируемых'
+                            write_log(log_file_name, msg)
+                            is_not_blocking = True
+                            break
+                    if is_not_blocking:
+                        update_scada_last_request(last_request_unix_time, scada_event_datetime, unix_ts, event_code,
+                                                  event_source)
+                        last_request_unix_time = unix_ts
+                        continue
+
             # Получаем Оборудование для которого создано событие
             dev_type_name = "не определено"
             substation_name = "не определено"
@@ -619,6 +708,9 @@ def check_event_source(event_source, param_dict):
                 msg = f'{datetime.now()} | {currentScript} | source: {event_source} | ' \
                     f'Не удалось определить оборудование для измерения с KeyLink = \'{scada_event_obj}\''
                 write_log(log_file_name, msg)
+                update_scada_last_request(last_request_unix_time, scada_event_datetime, unix_ts, event_code,
+                                          event_source)
+                last_request_unix_time = unix_ts
                 continue
 
             query = f" SELECT [{dbase_scada_model}].[dbo].[IdentifiedObject].name_, " \
@@ -653,18 +745,21 @@ def check_event_source(event_source, param_dict):
                     f'Не удалось определить подстанцию события \'{scada_event_keylink}\' ' \
                     f'для оборудования  \'{equipment_key}\''
                 write_log(log_file_name, msg)
+                update_scada_last_request(last_request_unix_time, scada_event_datetime, unix_ts, event_code,
+                                          event_source)
+                last_request_unix_time = unix_ts
                 continue
 
-            # Проверяем событие по подстанции в АСУ РЭО
-            check_result = check_substation_asu_reo(dbase_scada_model, event_source, scada_event_datetime,
-                                                    scada_model_cursor, asu_reo_cursor, substation_key)
-
             # Проверяем событие по подстанции в САП
+            check_result = check_substation_sap(dbase_scada_model, scada_model_cursor, event_source,
+                                                sap_requests, sap_requests_asap,
+                                                scada_event_datetime,
+                                                substation_key)
+
+            # Проверяем событие по подстанции в АСУ РЭО
             if check_result.unplannedEvent:
-                check_result = check_substation_sap(dbase_scada_model, scada_model_cursor, event_source,
-                                                    sap_requests, sap_requests_asap,
-                                                    scada_event_datetime,
-                                                    substation_key)
+                check_result = check_substation_asu_reo(dbase_scada_model, event_source, scada_event_datetime,
+                                                        scada_model_cursor, asu_reo_cursor, substation_key)
 
             # Проверяем событие по линиям к которым подключена подстанция  в АСУ РЭО
             if check_result.unplannedEvent:
@@ -677,8 +772,11 @@ def check_event_source(event_source, param_dict):
                                                sap_requests, sap_requests_asap,
                                                scada_event_datetime,
                                                substation_key)
-
             if check_result.unplannedEvent:
+
+                if already_handled_unplanned_event_id > 0:
+                    continue
+
                 result_string = f"<b>{event_description}</b>, код [{event_code}]<br>" \
                                     f"<b>Фактическое исполнение:</b> {scada_event_datetime}<br>" \
                                     f"<b>Подстанция:</b> {substation_name}<br>" \
@@ -707,14 +805,13 @@ def check_event_source(event_source, param_dict):
                 postgre_conn.commit()
 
             elif log_planned_events:
-                postgre_cursor.execute(f"SELECT * FROM event_type where name = \'plannedEvent\'")
-                planned_event_type = postgre_cursor.fetchone()[0]
 
                 result_string = f"{event_description}, код [{event_code}]<br>" \
-                                    f"<b>Фактическое исполнение:</b> {scada_event_datetime}<br>" \
-                                    f"<b>Подстанция:</b> {substation_name}<br>" \
-                                    f"<b>Оборудование:</b> {dev_type_name}<br>" \
-                                + user_values_string
+                    f"<b>Фактическое исполнение:</b> {scada_event_datetime}<br>" \
+                    f"<b>Подстанция:</b> {substation_name}<br>" \
+                    f"<b>Оборудование:</b> {dev_type_name}<br>" \
+                    f"{user_values_string}<br>" \
+                    f"Заявка:{check_result.message}"
 
                 txt_planned = "Событие запланировано. "
 
@@ -736,21 +833,19 @@ def check_event_source(event_source, param_dict):
                 }
 
                 data = json.dumps(json_data)
-                postgre_cursor.callproc('event_new', [planned_event_type, event_source, True, data])
+
+                if already_handled_unplanned_event_id == 0:
+                    postgre_cursor.callproc('event_new', [planned_event_type, event_source, True, data])
+                else:
+                    query = f"UPDATE event SET " \
+                        f"type = {planned_event_type}, " \
+                        f"data = '{data}' " \
+                        f"WHERE id = {already_handled_unplanned_event_id}"
+                    postgre_cursor.execute(query)
+
                 postgre_conn.commit()
 
-            if last_request_unix_time <= 0:
-                query = f"INSERT INTO  scada_last_request (date, unix_date, " \
-                    f"type_code, source_code)" \
-                    f" VALUES ('{scada_event_datetime}', {unix_ts} ,{event_code},{event_source})"
-            else:
-                query = f"UPDATE scada_last_request SET " \
-                    f" date = '{scada_event_datetime}'," \
-                    f" unix_date = {unix_ts} " \
-                    f"WHERE type_code = {event_code} and source_code = {event_source}"
-
-            postgre_cursor.execute(query)
-            postgre_conn.commit()
+            update_scada_last_request(last_request_unix_time, scada_event_datetime, unix_ts, event_code, event_source)
             last_request_unix_time = unix_ts
 
     # Закрываем все соеденения
@@ -765,6 +860,21 @@ def check_event_source(event_source, param_dict):
 
     if asu_reo_conn:
         asu_reo_conn.close()
+
+
+def update_scada_last_request(last_request_unix_time, scada_event_datetime, unix_ts, event_code, event_source):
+    if last_request_unix_time <= 0:
+        query = f"INSERT INTO  scada_last_request (date, unix_date, " \
+            f"type_code, source_code)" \
+            f" VALUES ('{scada_event_datetime}', {unix_ts} ,{event_code},{event_source})"
+    else:
+        query = f"UPDATE scada_last_request SET " \
+            f" date = '{scada_event_datetime}'," \
+            f" unix_date = {unix_ts} " \
+            f"WHERE type_code = {event_code} and source_code = {event_source}"
+
+    postgre_cursor.execute(query)
+    postgre_conn.commit()
 
 
 def check_all_event_sources():
@@ -804,10 +914,10 @@ if __name__ == "__main__":
     postgre_conn = None
     postgre_host = None
     postgre_database = None
-    oldest_zvk_date_delta = 100
     oldest_log_delta = 30
     log_planned_events = True
     console_messages = False
+    not_found_messages = False
 
     sap_end_date_column = 'tfdate'
     sap_end_date_column_asap = 'ausbs'
@@ -833,14 +943,14 @@ if __name__ == "__main__":
         postgre_port = config_ini.get('common', 'pgport')
         postgre_database = config_ini.get('common', 'pgdb')
         log_dir = config_ini.get('common', 'logdir')
-
+        data_dir = config_ini.get('common', 'datadir')
         sap_dir = config_ini.get('events_checker', 'sap_dir')
+
         sap_file = config_ini.get('events_checker', 'sap_file')
+        sap_dir = os.path.join(data_dir, sap_dir)
 
         log_file_name = config_ini.get('events_checker', 'logfile')
-
-        if log_dir != "":
-            log_file_name = log_dir + "/" + log_file_name
+        log_file_name = os.path.join(log_dir, log_file_name)
 
         postgre_conn = connect_to_postgre(postgre_database, postgre_user,
                                           postgre_pass, postgre_host, postgre_port, event_source_main)
@@ -856,6 +966,9 @@ if __name__ == "__main__":
 
         postgre_cursor.execute(f"SELECT * FROM event_type where name = \'{event_type_name}\'")
         event_type = postgre_cursor.fetchone()[0]
+
+        postgre_cursor.execute(f"SELECT * FROM event_type where name = \'plannedEvent\'")
+        planned_event_type = postgre_cursor.fetchone()[0]
 
         postgre_cursor.execute(f"SELECT * FROM event_source_params('{event_source_name}')")
         fields_map_params = fields(postgre_cursor)
